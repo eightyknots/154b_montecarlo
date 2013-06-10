@@ -1,0 +1,7 @@
+function [crackfail] = cracktest(sigma_0)
+[a_c,N_f,K] = crack(sigma_0);
+crackfail = 0;
+if N_f < 10e6
+    crackfail = 1;
+end 
+end

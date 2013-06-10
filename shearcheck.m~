@@ -1,0 +1,8 @@
+function [shearfail] = shearcheck(E,t,v,L,b,shear_max)
+N_cr = shear_buckling(E,t,v,L,b);
+shearfail = 0;
+if N_cr < shear_max
+    shearfail = 1;
+end
+end
+    

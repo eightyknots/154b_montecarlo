@@ -1,0 +1,10 @@
+function [sig_str,sig_spar,sig_cap,sig_skin] ...
+    = sigma(Ixx,Iyy,Ixy,Mx,My,str_areas,spar_areas,cap_areas,top_skin_areas,bot_skin_areas)
+    
+    % Stress at stringer locations
+    for i = 1:length(str_areas)
+        x = str_areas(i
+        sig_str(i) = (Ixx*My-Ixy*Mx)/(Iyy*Ixx-Ixy^2)*x+(Iyy*Mx-Ixy*My)/(Iyy*Ixx-Ixy^2)*y;
+    end
+
+end

@@ -1,0 +1,418 @@
+%% MAIN WING OPTIMIZATION SCRIPT
+
+clear all;
+clc;
+close all;
+
+initialize;
+set_ranges;
+
+[top,bot,pts] = create(c);
+
+% Set randomization engine (engine,seed)
+rand('twister',333);
+
+% Create storage blocks
+thicknesses = zeros(total,4); % 4 component types
+front_spar = zeros(total,1);
+stringer_placement = zeros(s_max,2,total); % 3d matrix, x/y positions
+rib_spacing = zeros(total,1);
+mass = zeros(total,1);
+shear_cr = zeros(total,1);
+plate_cr = zeros(total,1);
+cycles = zeros(total,1);
+compress = zeros(total,1);
+tensile = zeros(total,1);
+shear_stress = zeros(total,1);
+vonmises_stress = zeros(total,1);
+good = zeros(total,1); % max of all good
+bad = zeros(total,1); % max of all bad
+
+% CREATE RANDOMLY GENERATED WING
+for iter = 1:total % Main loop starts here
+
+% Number of stringers
+num_str = round(s_min+rand*(s_max-s_min));
+
+% Front spar location
+fs_loc = fs_min + round(100*rand*(fs_max-fs_min))/100;
+
+% Stringer locations
+str_loc = zeros(num_str,2);
+top_str = 0;
+bot_str = 0;
+check_top = zeros(num_str,1);
+check_bot = zeros(num_str,1);
+for a = 1:num_str
+    % Set random x location along 3/4 chord
+    x = rand*0.65+.05; % first stringer can be max fwd position of 5% chord, max aft of 70%
+    if rand >= 0.4 % 60% chance of stringer on top skin
+        if top_str == 0
+            y = getpoint(x,'top',c);
+            str_loc(a,:) = [x*c,y];
+            top_str = top_str+1;
+            check_top(top_str) = x;
+        else
+            check = 1;
+            while check <= num_str
+                if abs(x-check_top(check)) <= 0.025 || abs(x-.25) <= 0.05
+                    x = rand*0.65+.05;
+                    check = 0;
+                end    
+                check = check+1;
+            end
+            y = getpoint(x,'top',c);
+            str_loc(a,:) = [x*c,y];
+            top_str = top_str+1;
+            check_top(top_str+1) = x;
+        end    
+    else % 40% chance of stringer on bottom skin
+        if bot_str == 0;
+            y = getpoint(x,'bot',c);
+            str_loc(a,:) = [x*c,y];
+            bot_str = bot_str+1;
+            check_bot(bot_str) = x;
+        else
+            check = 1;
+            while check <= num_str
+                if abs(x-check_bot(check)) <= 0.025 || abs(x-.25) <= 0.1
+                    x = rand*0.65+.05;
+                    check = 0;
+                end    
+                check = check+1;
+            end
+            y = getpoint(x,'bot',c);
+            str_loc(a,:) = [x*c,y];
+            bot_str = bot_str+1;
+            check_bot(bot_str+1) = x;
+        end    
+    end
+end
+
+% Order stringers clockwise from leading edge
+str_loc = stringers(top_str,str_loc,num_str);
+
+% Load available aluminum thicknesses (all in inches)
+load('alum.mat');
+alum = alum.*.0254; % convert matrix from inches to meters
+
+% Start at specific material index for all
+str_t = 5+round(rand*(10-5));
+spar_t = 8+round(rand*(15-8));
+cap_t = 5+round(rand*(10-5));
+skin_t = 1+round(rand*(8-3));
+% str_t = 3+round(rand*(15-3));
+% spar_t = 3+round(rand*(15-3));
+% cap_t = 3+round(rand*(15-3));
+% skin_t = 3+round(rand*(15-3));
+
+% Note: eventually loop to increase thickness if strength inadequate
+
+% Get matrices for stringer, spar, and spar cap locations and areas
+[str_areas,spar_areas,cap_areas,skin_areas] = place_areas(num_str,alum,str_t,spar_t,cap_t,skin_t,c,str_loc,fs_loc,pts,top,bot);
+
+% X,Y loading, shear loading, and moments
+[Wx_0,Wy_0,Wx_10,Wy_10,Wx_15,Wy_15] = load_distribution();
+[Sx_0,Sy_0,Sx_10,Sy_10,Sx_15,Sy_15] = shear(Wx_0,Wy_0,Wx_10,Wy_10,Wx_15,Wy_15);
+[Mx_0,My_0,Mx_10,My_10,Mx_15,My_15] = moment(Sx_0,Sy_0,Sx_10,Sy_10,Sx_15,Sy_15);
+
+% Centroid and inertia calculations
+[cent_skin,I_skin,A_skin,AFpnt] = skin(alum(skin_t));
+[I,cent,num,comp] = inertia(str_areas,spar_areas,cap_areas,cent_skin,I_skin,A_skin);
+
+% if iter == 120
+% spar = comp_plot(num,cent,comp);
+% end
+
+Ixx = I(1);
+Iyy = I(2);
+Ixy = I(3);
+
+% Moments for limiting condition
+Mx = Mx_15(1,1);
+My = My_15(1,1);
+
+% Get stress values at each component location
+[sig_str,sig_spar,sig_cap,sig_skin] = sigma(Ixx,Iyy,Ixy,Mx,My,str_areas,spar_areas,cap_areas,skin_areas,cent);
+
+% Boom and plate approximation
+[boom_areas,top_index,rear_index,bot_index] = boom_plate(sig_skin,sig_cap,fs_loc,c,alum,skin_t,spar_t,cap_areas,str_areas);
+% [boom_areas_1,boom_areas_2] = boom_plate(sig_skin,sig_spar,fs_loc,c,alum,skin_t,spar_t,top_str,num_str,cap_areas,str_areas);
+
+% SHEAR FLOW CALCULATION
+
+% Coefficient of moment from XFOIL
+% PHAA at 15,000 ft limiting case
+Cm = -.0007;
+S = 13.1303;
+rho = .7711;
+v_phaa_15k = 69.4;
+% Cm = -.0244;
+% S = 13.1303;
+% rho = 1.225;
+% v_phaa_sl = 54;
+M = -.5*rho*v_phaa_15k^2*S*c*Cm;
+
+% Reference from AC
+boom_areas(:,1) = boom_areas(:,1)-0.25*c;
+boom_areas(:,2) = boom_areas(:,2)-getpoint(fs_loc,'mid',c);
+
+% Values
+% Take load conditions from Cole's matrix [Sx_0,Sy_0,Sx_10,Sy_10,Sx_15,Sy_15]
+V_x = [Sx_0; Sx_10; Sx_15]; % 12 rows - 4 conditions at 3 altitudes
+V_y = [Sy_0; Sy_10; Sy_15];
+% Inertia ratios
+k_x = Ixx/(Iyy*Ixx-Ixy^2);
+k_y = Iyy/(Iyy*Ixx-Ixy^2);
+k_xy = Ixy/(Iyy*Ixx-Ixy^2);
+% Get cell areas
+[A_cell1 A_cell2] = cell_area(fs_loc);
+% Get spar lengths
+fspar = boom_areas(top_index,2)-boom_areas(bot_index,2);
+rspar = boom_areas(rear_index,2)-boom_areas(rear_index+1,2);
+
+% Create Cell I (all points forward of forward spar)
+cell_1 = zeros((top_index-2)*2,3); % -2 because doesn't include spar booms
+for index = 1:top_index-1
+    cell_1(index,:) = boom_areas(top_index-1-(index-1),:);
+end
+point = index;
+for index = 1:top_index-2
+    cell_1(point+index,:) = boom_areas(length(boom_areas)-(index-1),:);
+end
+
+% Create Cell II (all points rear of/including forward spar
+cell_2 = zeros(length(boom_areas)-length(cell_1)-1,3);
+point = 1;
+cell_2(point,:) = boom_areas(top_index,:);
+point = point+1;
+cell_2(point,:) = boom_areas(bot_index,:);
+for index = 1:bot_index-top_index-1
+    cell_2(index+point,:) = boom_areas(bot_index-index,:);
+end
+
+% !!! Limiting case - loading at root at PHAA at 15,000 ft !!!
+S_x = V_x(9,1);
+S_y = V_y(9,1);
+
+q_prime_1 = zeros(length(cell_1),3);
+for flow = 1:length(cell_1)
+    if flow == 1
+        q_prime_1(flow,3) = 0;
+    else 
+        q_prime_1(flow,3) = q_prime_1(flow-1,3)-(S_x*k_x-S_y*k_xy)*(cell_1(flow,1)*cell_1(flow,3))-(S_y*k_y-S_x*k_xy)*(cell_1(flow,2)*cell_1(flow,3));
+    end
+       
+end
+
+length_1 = zeros(length(cell_1),1);
+for seg = 1:length(cell_1)
+    if seg<length(cell_1)
+        length_1(seg) = sqrt((cell_1(seg+1,1)-cell_1(seg,1))^2+(cell_1(seg+1,2)-cell_1(seg,2))^2);
+    else
+        length_1(seg) = sqrt((cell_1(1,1)-cell_1(seg,1))^2+(cell_1(1,2)-cell_1(seg,2))^2);
+    end
+end
+% adjust for thicknesses
+delta_1 = length_1./alum(skin_t);
+delta_1(length(delta_1)) = delta_1(length(delta_1))/alum(spar_t)*alum(skin_t);
+
+q_prime_2 = zeros(length(cell_2),3);
+for flow = 1:length(cell_2)
+    if flow == length(cell_2)
+        q_prime_2(flow,3) = 0;
+    elseif flow == 1    
+        q_prime_2(flow,3) = -(S_x*k_x-S_y*k_xy)*(cell_2(flow,1)*cell_2(flow,3))-(S_y*k_y-S_x*k_xy)*(cell_2(flow,2)*cell_2(flow,3));
+    elseif flow == 2
+        q_prime_2(flow,3) = q_prime_1(length(q_prime_1),3)+q_prime_2(flow-1,3)-(S_x*k_x-S_y*k_xy)*(cell_2(flow,1)*cell_2(flow,3))-(S_y*k_y-S_x*k_xy)*(cell_2(flow,2)*cell_2(flow,3));
+    else
+        q_prime_2(flow,3) = q_prime_2(flow-1,3)-(S_x*k_x-S_y*k_xy)*(cell_2(flow,1)*cell_2(flow,3))-(S_y*k_y-S_x*k_xy)*(cell_2(flow,2)*cell_2(flow,3));
+    end
+end
+
+length_2 = zeros(length(cell_2),1);
+for seg = 1:length(cell_2)
+    if seg<length(cell_2)
+        length_2(seg) = sqrt((cell_2(seg+1,1)-cell_2(seg,1))^2+(cell_2(seg+1,2)-cell_2(seg,2))^2);
+    else
+        length_2(seg) = sqrt((cell_2(1,1)-cell_2(seg,1))^2+(cell_2(1,2)-cell_2(seg,2))^2);
+    end
+end
+% adjust for thicknesses
+delta_2 = length_2./alum(skin_t);
+delta_2(1) = delta_2(1)/alum(spar_t)*alum(skin_t);
+delta_2(bot_index-rear_index+1) = delta_2(bot_index-rear_index+1)/alum(spar_t)*alum(skin_t);
+
+%[q0I q0II dthetadz]
+% Twist angle equations (twist of cell 1 equal to twist of cell II)
+% Cell I (left side of equation)
+eqI = [(sum(delta_1)+fspar/alum(spar_t))/(2*A_cell1*G), (-fspar/alum(spar_t))/(2*A_cell1*G), -1];
+% Cell II (left side of equation)
+eqII = [(-fspar/alum(spar_t))/(2*A_cell2*G), (sum(delta_2))/(2*A_cell2*G), -1];
+% Moment balance (left side of equation)
+eqIII = [2*A_cell1, 2*A_cell2, 0];
+
+% Constants
+% Moment from aero forces (taken about AC)
+pitch_moment = M;
+q = .1;
+% Moment arm to each shear flow point
+arm_1 = zeros(length(cell_1),1);
+for i = 1:length(cell_1)
+    arm_1(i) = sqrt(cell_1(i,1)^2+cell_1(i,2)^2);
+end
+arm_2 = zeros(length(cell_2),1);
+for i = 1:length(cell_2)
+    arm_2(i) = sqrt(cell_2(i,1)^2+cell_2(i,2)^2);
+end
+moments = sum(q_prime_1(1:length(cell_1)-1,3).*length_1(1:length(cell_1)-1).*arm_1(1:length(cell_1)-1))+...
+    sum(q_prime_2(2:length(cell_2),3).*length_2(2:length(cell_2)).*arm_2(2:length(cell_2)));
+constants = [-(sum(q_prime_1(:,3).*delta_1)-q_prime_2(1,3).*delta_2(1))/(2*A_cell1*G); ...
+    -sum(q_prime_2(:,3).*delta_2)/(2*A_cell2*G); ...
+    -moments+M];
+
+% Solve
+shear_flow = [eqI;eqII;eqIII]\constants;
+q0I = shear_flow(1)*q;
+q0II = shear_flow(2)*q;
+dtheta = shear_flow(3);
+
+q_I = q_prime_1(:,3)+q0I;
+q_II = q_prime_2(:,3)+q0II;
+
+% Find max distance between stringers
+str_dist = zeros(num_str,1);
+dist = zeros(length(boom_areas(:,1)),1);
+% Calculate distances between stringers by breaking up skin into lengths
+str_loc(:,1) = str_loc(:,1)-0.25*c;
+str_loc(:,2) = str_loc(:,2)-getpoint(fs_loc,'mid',c);
+for k = 1:num_str
+    if k < num_str
+        point1 = str_loc(k,1:2);
+        point2 = str_loc(k+1,1:2);
+    else
+        point1 = str_loc(k,1:2);
+        point2 = str_loc(1,1:2);
+    end
+    for i = 1:length(boom_areas(:,1))
+        if i < length(boom_areas(:,1))
+            dist(i) = sqrt(abs(boom_areas(i,1)-boom_areas(i+1,1))^2+abs(boom_areas(i,2)-boom_areas(i+1,2))^2);
+        else
+            dist(i) = sqrt(abs(boom_areas(i,1)-boom_areas(1,1))^2+abs(boom_areas(i,2)-boom_areas(1,2))^2);
+        end
+    end
+    index1 = 0;
+    index2 = 0;
+    for j = 1:length(boom_areas(:,1))-1
+        if point1(2) > 0
+            if boom_areas(j,1) < point1(1) && boom_areas(j+1,1) > point1(1)
+                index1 = j;
+            end
+        end
+        if point2(2) > 0
+            if boom_areas(j,1) < point2(1) && boom_areas(j+1,1) > point2(1)
+                index2 = j;
+                %break;
+            end
+        end
+        if point1(2) < 0    
+            if boom_areas(j,1) > point1(1) && boom_areas(j+1,1) < point1(1)
+                index1 = j;
+            end
+        end
+        if point2(2) < 0
+            if boom_areas(j,1) > point2(1) && boom_areas(j+1,1) < point2(1)
+                index2 = j;
+                %break;
+            end
+        end
+    end
+    if index2 < index1
+        str_dist(k) = sum(dist(1:index2))+sum(dist(index1:length(dist)));
+    else
+        str_dist(k) = sum(dist(index1:index2));
+    end
+end
+% Inputs for shear buckling
+max_str_dist = max(str_dist);
+% Inputs for plate buckling
+max_top_str_dist = max(str_dist(1:top_str));
+% Inputs for fatigue and Von Mises
+max_comp = min(sig_str(:,3));
+max_tens = max(sig_str(:,3));
+max_shearstress = abs(min([q_I;q_II])/alum(skin_t));
+
+% FAILURE CHECKS
+
+% Beam buckling
+% !!! Temporary dimensions for stringers !!!
+b = .0286;
+h = .0286;
+t = alum(str_t);
+% get stringer parameters
+[area_stringer,I_xxstringer,I_yystringer,I_xystringer] = stringer(b,h,t);
+% get rib spacing
+sigma_zz = abs(max_comp);
+L = buckling(sigma_zz,area_stringer,E,I_xxstringer,I_yystringer,I_xystringer);
+% Check shear buckling
+[shearfail,N_cr_shear] = shearcheck(E,alum(skin_t),v,L,max_shearstress,max_str_dist); % compare shear stress to critical load
+% Check plate buckling
+[platefail,N_cr_plate] = plate_check(E,alum(skin_t),v,L,sigma_zz,area_stringer); % compare compressive stress to critical load
+% Check crack propagation and fatigue cycles
+sigma_0 = abs(max_tens);
+[crackfail,N_f] = cracktest(sigma_0); %compare N_f to min acceptable cycles (10e6)
+% Check von mises stress vs. yield stress
+[vonmisesfail,sigma_vm] = vonmisescheck(sigma_zz,max_shearstress);
+
+% SORT PARAMETERS FOR STORAGE
+thicknesses(iter,:) = [alum(spar_t) alum(str_t) alum(cap_t) alum(skin_t)];
+front_spar(iter) = fs_loc;
+stringer_placement(1:length(str_loc(:,1)),1:2,iter) = str_loc;
+rib_spacing(iter) = L;
+% mass for half span wing
+mass(iter) = dens*half_span*(6*alum(cap_t)^2+alum(spar_t)*fspar+alum(spar_t)*rspar+area_stringer*num_str+sum(dist)*alum(skin_t))+round(half_span/L);
+% failure parameters
+shear_cr(iter) = N_cr_shear;
+plate_cr(iter) = N_cr_plate;
+cycles(iter) = N_f;
+compress(iter) = abs(max_comp);
+tensile(iter) = abs(max_tens);
+shear_stress(iter) = abs(max_shearstress);
+vonmises_stress(iter) = sigma_vm;
+% plotting parameters
+% num_input(:,:,iter) = num;
+% cent_input(:,:,iter) = cent;
+% comp_input(:,:,iter) = comp;
+
+% FINAL SORT TO KEEP/JUNK
+num_good = 0;
+if shearfail == 0 && platefail == 0 && crackfail == 0 && vonmisesfail == 0
+    good(iter) = iter; % Save index number in good matrix
+    num_good = num_good+1;
+else
+    bad(iter) = iter; % Sort to bad matrix
+end
+
+massHist = zeros(num_good,1);
+% find lowest mass config
+lowest_mass = 1000000000; % start at extremely overestimated
+n = 1;
+for config = 1:length(good)
+    if good(config) ~= 0
+        massHist(n) = mass(config);
+        if mass(config)<lowest_mass
+            lowest_mass = mass(config);
+            lowest_mass_index = config;
+        end
+        n = n+1;
+    end 
+end
+
+end % Main loop ends here
+
+% Plot MonteCarlo distribution
+% if iter
+% figure(1)
+% hist(massHist);
+% xlabel('Mass (kg)');
+% ylabel('Number of occurences');
